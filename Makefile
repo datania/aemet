@@ -4,11 +4,11 @@
 
 .PHONY: estaciones
 estaciones: .uv
-	./aemet estaciones -o data
+	uv run aemet estaciones -o data
 
 .PHONY: valores-climatologicos
 valores-climatologicos: .uv
-	./aemet valores-climatologicos --start 1920-01-01 --end 2025-01-01 -o data
+	uv run aemet valores-climatologicos --start 1920-01-01 --end 2025-01-01 -o data
 
 .PHONY: api-specs
 api-specs:

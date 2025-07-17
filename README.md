@@ -12,7 +12,8 @@ Para ejecutar el scripts en local, necesitas tener `uv` y la variable `AEMET_API
 Si quieres ejecutar el script, basta con hacer:
 
 ```bash
-make run
+make estaciones
+make valores-climatologicos
 ```
 
 También puede ejecutarlo directamente.

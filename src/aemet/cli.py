@@ -1,11 +1,3 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# dependencies = [
-#   "httpx",
-# ]
-# ///
-
-
 import json
 import os
 import sys
@@ -21,7 +13,7 @@ BASE_URL = "https://opendata.aemet.es/opendata/api"
 BATCH_SIZE_DAYS = 15
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 1.0
-REQUEST_DELAY = 0.5
+REQUEST_DELAY = 0.0
 
 # Type aliases
 StationInfo = Dict[str, Any]
@@ -30,7 +22,12 @@ WeatherData = Dict[str, Any]
 
 def create_client(api_token: str) -> httpx.Client:
     """Create configured httpx client with API token."""
-    return httpx.Client(timeout=30.0, params={"api_key": api_token})
+    return httpx.Client(
+        timeout=httpx.Timeout(60.0, connect=30.0),
+        params={"api_key": api_token},
+        verify=True,
+        follow_redirects=True,
+    )
 
 
 def fetch_with_retry(
@@ -77,8 +74,9 @@ def fetch_with_retry(
             else:
                 response.raise_for_status()
 
-        except Exception:
+        except Exception as e:
             if attempt < max_retries - 1:
+                print(f"Retry {attempt + 1}/{max_retries}: {str(e)}", file=sys.stderr)
                 time.sleep(backoff)
                 backoff *= 2
             else:
@@ -100,17 +98,6 @@ def fetch_daily_batch(
     """Fetch climate data for date range (max 15 days)."""
     url = f"{BASE_URL}/valores/climatologicos/diarios/datos/fechaini/{start_date}/fechafin/{end_date}/todasestaciones"
     return fetch_with_retry(client, url)
-
-
-def join_with_stations(
-    weather_data: List[WeatherData], stations: Dict[str, StationInfo]
-) -> List[WeatherData]:
-    """Enrich weather data with station information."""
-    for record in weather_data:
-        station_id = record.get("indicativo")
-        if station_id in stations:
-            record["station_info"] = stations[station_id]
-    return weather_data
 
 
 def group_by_date(data: List[WeatherData]) -> Dict[str, List[WeatherData]]:
@@ -159,9 +146,7 @@ def save_daily_data_by_station(
     for record in data:
         indicativo = record.get("indicativo")
         if indicativo:
-            # Remove station_info from the weather record since it's saved separately
-            clean_record = {k: v for k, v in record.items() if k != "station_info"}
-            stations_data[indicativo] = clean_record
+            stations_data[indicativo] = record
 
     # Save each station's data (only if not exists)
     saved_count = 0
@@ -190,7 +175,6 @@ def check_date_exists(date_str: str, output_dir: Path) -> bool:
 
 def process_date_range(
     client: httpx.Client,
-    stations: Dict[str, StationInfo],
     start_date: datetime,
     end_date: datetime,
     output_dir: Path,
@@ -228,8 +212,7 @@ def process_date_range(
 
             # Fetch and process batch
             batch_data = fetch_daily_batch(client, start_str, end_str)
-            enriched_data = join_with_stations(batch_data, stations)
-            daily_groups = group_by_date(enriched_data)
+            daily_groups = group_by_date(batch_data)
 
             # Save each day's data by station
             for date_str, day_data in daily_groups.items():
@@ -248,9 +231,12 @@ def process_date_range(
         # Move to next batch
         current = batch_end + timedelta(days=1)
 
-        # Rate limiting between batches
+        # Rate limiting between batches - longer delay for historical data
         if current <= end_date:
-            time.sleep(REQUEST_DELAY)
+            if current.year < 2000:
+                time.sleep(2.0)  # Longer delay for historical data
+            else:
+                time.sleep(REQUEST_DELAY)
 
 
 def cmd_estaciones(args) -> None:
@@ -308,9 +294,7 @@ def cmd_valores_climatologicos(args) -> None:
     client = create_client(api_token)
 
     try:
-        # Don't fetch stations for climate data - they're separate commands
-        stations = {}
-        process_date_range(client, stations, start_date, end_date, output_dir)
+        process_date_range(client, start_date, end_date, output_dir)
         print(
             f"\nClimate data saved to {output_dir}/valores-climatologicos/",
             file=sys.stderr,
