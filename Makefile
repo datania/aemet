@@ -14,6 +14,12 @@ valores-climatologicos: .uv
 api-specs:
 	@curl -s -o aemet-api-specs.json https://opendata.aemet.es/AEMET_OpenData_specification.json
 
+.PHONY: lint
+lint:
+	uvx ruff check
+	uvx ty check
+
+
 .PHONY: clean
 clean:
 	rm -rf data/
