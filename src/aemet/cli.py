@@ -4,113 +4,82 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, cast
 
 import httpx
 
 # Constants
 BASE_URL = "https://opendata.aemet.es/opendata/api"
 BATCH_SIZE_DAYS = 15
-MAX_RETRIES = 5
-INITIAL_BACKOFF = 1.0
-REQUEST_DELAY = 0.0
-
-# Type aliases
-StationInfo = Dict[str, Any]
-WeatherData = Dict[str, Any]
 
 
 def create_client(api_token: str) -> httpx.Client:
     """Create configured httpx client with API token."""
     return httpx.Client(
-        timeout=httpx.Timeout(60.0, connect=30.0),
+        timeout=httpx.Timeout(60.0),
         params={"api_key": api_token},
-        verify=True,
         follow_redirects=True,
     )
 
 
-def fetch_with_retry(
-    client: httpx.Client, url: str, max_retries: int = MAX_RETRIES
-) -> Any:
-    """Execute AEMET's two-step API fetch with exponential backoff."""
-    backoff = INITIAL_BACKOFF
-
-    for attempt in range(max_retries):
+def fetch_data(client: httpx.Client, url: str) -> Any:
+    """Execute AEMET's two-step API fetch with retry on rate limits."""
+    # Step 1: Get the data URL
+    while True:
         try:
             response = client.get(url)
-
-            if response.status_code == 200:
-                data = response.json()
-
-                # Check if this is the two-step response with datos URL
-                if isinstance(data, dict) and "datos" in data:
-                    datos_url = data["datos"]
-
-                    # Step 2: Fetch actual data
-                    time.sleep(REQUEST_DELAY)
-                    data_response = client.get(datos_url)
-
-                    if data_response.status_code == 200:
-                        # Handle different encodings
-                        try:
-                            return data_response.json()
-                        except UnicodeDecodeError:
-                            # Try with latin-1 encoding
-                            content = data_response.content.decode("latin-1")
-                            return json.loads(content)
-                    else:
-                        raise Exception(
-                            f"Data fetch failed: {data_response.status_code}"
-                        )
-                else:
-                    # Direct response (like station info)
-                    return data
-
-            elif response.status_code in (429, 500, 502, 503):
-                time.sleep(backoff)
-                backoff *= 2
+            response.raise_for_status()
+            break
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 429:
+                print("Rate limited, waiting 60 seconds...", file=sys.stderr)
+                time.sleep(60)
                 continue
-            else:
-                response.raise_for_status()
+            raise
 
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"Retry {attempt + 1}/{max_retries}: {str(e)}", file=sys.stderr)
-                time.sleep(backoff)
-                backoff *= 2
-            else:
+    data = response.json()
+
+    # Check if this is the two-step response
+    if isinstance(data, dict) and "datos" in data:
+        # Step 2: Fetch actual data from the provided URL
+        while True:
+            try:
+                data_response = client.get(data["datos"])
+                data_response.raise_for_status()
+                break
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    print("Rate limited, waiting 60 seconds...", file=sys.stderr)
+                    time.sleep(60)
+                    continue
                 raise
 
-    raise Exception(f"Failed after {max_retries} attempts")
+        # Handle different encodings
+        try:
+            return data_response.json()
+        except UnicodeDecodeError:
+            # Try with latin-1 encoding
+            content = data_response.content.decode("latin-1")
+            return json.loads(content)
+
+    # Direct response (like station info)
+    return data
 
 
-def fetch_station_info(client: httpx.Client) -> Dict[str, StationInfo]:
-    """Fetch all station metadata and return as dict keyed by station ID."""
+def fetch_station_info(client: httpx.Client) -> dict:
+    """Fetch all station metadata."""
     url = f"{BASE_URL}/valores/climatologicos/inventarioestaciones/todasestaciones"
-    stations = fetch_with_retry(client, url)
+    stations = fetch_data(client, url)
     return {s["indicativo"]: s for s in stations}
 
 
-def fetch_daily_batch(
-    client: httpx.Client, start_date: str, end_date: str
-) -> List[WeatherData]:
-    """Fetch climate data for date range (max 15 days)."""
+def fetch_daily_batch(client: httpx.Client, start_date: str, end_date: str) -> list:
+    """Fetch climate data for date range."""
     url = f"{BASE_URL}/valores/climatologicos/diarios/datos/fechaini/{start_date}/fechafin/{end_date}/todasestaciones"
-    return fetch_with_retry(client, url)
+    return fetch_data(client, url)
 
 
-def group_by_date(data: List[WeatherData]) -> Dict[str, List[WeatherData]]:
-    """Group weather records by date."""
-    grouped: Dict[str, List[WeatherData]] = {}
-    for record in data:
-        date = record.get("fecha")
-        if date:
-            grouped.setdefault(date, []).append(record)
-    return grouped
-
-
-def save_station_info(stations: Dict[str, StationInfo], output_dir: Path) -> int:
+def save_station_info(stations: dict, output_dir: Path) -> int:
     """Save station info to estaciones/[indicativo].json."""
     stations_dir = output_dir / "estaciones"
     stations_dir.mkdir(parents=True, exist_ok=True)
@@ -119,18 +88,17 @@ def save_station_info(stations: Dict[str, StationInfo], output_dir: Path) -> int
     for indicativo, station_data in stations.items():
         file_path = stations_dir / f"{indicativo}.json"
         if not file_path.exists():
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(station_data, f, ensure_ascii=False, indent=2)
+            file_path.write_text(
+                json.dumps(station_data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
             saved_count += 1
 
     return saved_count
 
 
-def save_daily_data_by_station(
-    date_str: str, data: List[WeatherData], output_dir: Path
-) -> int:
+def save_daily_data(date_str: str, data: list, output_dir: Path) -> int:
     """Save data to valores-climatologicos/YYYY/MM/DD/[indicativo].json."""
-    # Parse date and create directory structure
+    # Parse date and create directory
     date = datetime.strptime(date_str, "%Y-%m-%d")
     day_dir = (
         output_dir
@@ -141,105 +109,73 @@ def save_daily_data_by_station(
     )
     day_dir.mkdir(parents=True, exist_ok=True)
 
-    # Group data by station
-    stations_data = {}
-    for record in data:
-        indicativo = record.get("indicativo")
-        if indicativo:
-            stations_data[indicativo] = record
-
-    # Save each station's data (only if not exists)
+    # Group by station and save
     saved_count = 0
-    for indicativo, station_record in stations_data.items():
-        file_path = day_dir / f"{indicativo}.json"
-        if not file_path.exists():
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(station_record, f, ensure_ascii=False, indent=2)
-            saved_count += 1
+    for record in data:
+        if indicativo := record.get("indicativo"):
+            file_path = day_dir / f"{indicativo}.json"
+            if not file_path.exists():
+                file_path.write_text(
+                    json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                saved_count += 1
 
     return saved_count
 
 
-def check_date_exists(date_str: str, output_dir: Path) -> bool:
-    """Check if data for a specific date already exists."""
-    date = datetime.strptime(date_str, "%Y-%m-%d")
-    day_dir = (
-        output_dir
-        / "valores-climatologicos"
-        / f"{date.year:04d}"
-        / f"{date.month:02d}"
-        / f"{date.day:02d}"
-    )
-    return day_dir.exists() and any(day_dir.glob("*.json"))
-
-
 def process_date_range(
-    client: httpx.Client,
-    start_date: datetime,
-    end_date: datetime,
-    output_dir: Path,
-) -> None:
-    """Process date range in 15-day batches."""
+    client: httpx.Client, start_date: datetime, end_date: datetime, output_dir: Path
+):
+    """Process date range in batches."""
     current = start_date
 
     while current <= end_date:
         # Calculate batch end (max 15 days)
         batch_end = min(current + timedelta(days=BATCH_SIZE_DAYS - 1), end_date)
 
-        # Check which dates in this batch already exist
+        # Check if any dates in batch need fetching
         dates_needed = []
         temp_date = current
         while temp_date <= batch_end:
             date_str = temp_date.strftime("%Y-%m-%d")
-            if not check_date_exists(date_str, output_dir):
-                dates_needed.append(temp_date)
+            day_dir = (
+                output_dir
+                / "valores-climatologicos"
+                / f"{temp_date.year:04d}"
+                / f"{temp_date.month:02d}"
+                / f"{temp_date.day:02d}"
+            )
+            if not (day_dir.exists() and any(day_dir.glob("*.json"))):
+                dates_needed.append(date_str)
             temp_date += timedelta(days=1)
 
-        if not dates_needed:
-            print(
-                f"Data already exists for {current.date()} to {batch_end.date()}, skipping",
-                file=sys.stderr,
-            )
-        else:
-            # Format dates for API
+        if dates_needed:
+            # Fetch batch
             start_str = current.strftime("%Y-%m-%dT00:00:00UTC")
             end_str = batch_end.strftime("%Y-%m-%dT23:59:59UTC")
 
-            print(
-                f"Fetching data from {current.date()} to {batch_end.date()}",
-                file=sys.stderr,
-            )
-
-            # Fetch and process batch
+            print(f"Fetching {current.date()} to {batch_end.date()}", file=sys.stderr)
             batch_data = fetch_daily_batch(client, start_str, end_str)
-            daily_groups = group_by_date(batch_data)
 
-            # Save each day's data by station
-            for date_str, day_data in daily_groups.items():
-                saved_count = save_daily_data_by_station(date_str, day_data, output_dir)
+            # Group by date and save
+            grouped = {}
+            for record in batch_data:
+                if date := record.get("fecha"):
+                    grouped.setdefault(date, []).append(record)
+
+            for date_str, day_data in grouped.items():
+                saved_count = save_daily_data(date_str, day_data, output_dir)
                 if saved_count > 0:
                     print(
                         f"  Saved {saved_count} stations for {date_str}",
-                        file=sys.stderr,
-                    )
-                else:
-                    print(
-                        f"  Data already exists for {date_str}, skipped",
                         file=sys.stderr,
                     )
 
         # Move to next batch
         current = batch_end + timedelta(days=1)
 
-        # Rate limiting between batches - longer delay for historical data
-        if current <= end_date:
-            if current.year < 2000:
-                time.sleep(2.0)  # Longer delay for historical data
-            else:
-                time.sleep(REQUEST_DELAY)
 
-
-def cmd_estaciones(args) -> None:
+def cmd_estaciones(args):
     """Fetch and save station information."""
     api_token = os.environ.get("AEMET_API_TOKEN")
     if not api_token:
@@ -247,33 +183,21 @@ def cmd_estaciones(args) -> None:
         sys.exit(1)
 
     output_dir = Path(args.output)
-    client = create_client(api_token)
 
-    try:
-        # Check if stations already exist
-        stations_dir = output_dir / "estaciones"
-        if stations_dir.exists() and any(stations_dir.glob("*.json")):
-            print(
-                f"Station data already exists in {output_dir}/estaciones/, skipping fetch",
-                file=sys.stderr,
-            )
-        else:
-            print("Fetching station information...", file=sys.stderr)
-            stations = fetch_station_info(client)
-            saved_count = save_station_info(stations, output_dir)
-            print(
-                f"Saved {saved_count} new stations to {output_dir}/estaciones/",
-                file=sys.stderr,
-            )
+    # Check if stations already exist
+    stations_dir = output_dir / "estaciones"
+    if stations_dir.exists() and any(stations_dir.glob("*.json")):
+        print("Station data already exists, skipping", file=sys.stderr)
+        return
 
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        client.close()
+    with create_client(cast(str, api_token)) as client:
+        print("Fetching station information...", file=sys.stderr)
+        stations = fetch_station_info(client)
+        saved_count = save_station_info(stations, output_dir)
+        print(f"Saved {saved_count} stations", file=sys.stderr)
 
 
-def cmd_valores_climatologicos(args) -> None:
+def cmd_valores_climatologicos(args):
     """Fetch and save climate data."""
     api_token = os.environ.get("AEMET_API_TOKEN")
     if not api_token:
@@ -291,20 +215,10 @@ def cmd_valores_climatologicos(args) -> None:
 
     print(f"Date range: {start_date.date()} to {end_date.date()}", file=sys.stderr)
     output_dir = Path(args.output)
-    client = create_client(api_token)
 
-    try:
+    with create_client(cast(str, api_token)) as client:
         process_date_range(client, start_date, end_date, output_dir)
-        print(
-            f"\nClimate data saved to {output_dir}/valores-climatologicos/",
-            file=sys.stderr,
-        )
-
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    finally:
-        client.close()
+        print(f"\nData saved to {output_dir}/valores-climatologicos/", file=sys.stderr)
 
 
 def main():
@@ -354,9 +268,6 @@ def main():
         cmd_estaciones(args)
     elif args.command == "valores-climatologicos":
         cmd_valores_climatologicos(args)
-    else:
-        print(f"Unknown command: {args.command}", file=sys.stderr)
-        sys.exit(1)
 
 
 if __name__ == "__main__":
