@@ -2,13 +2,13 @@
 .uv:
 	@uv -V || echo 'Please install uv: https://docs.astral.sh/uv/getting-started/installation/'
 
-.PHONY: setup
-setup: .uv
-	uv sync
+.PHONY: estaciones
+estaciones: .uv
+	./aemet estaciones -o data
 
-.PHONY: run
-run: .uv
-	uv run aemet.py
+.PHONY: valores-climatologicos
+valores-climatologicos: .uv
+	./aemet valores-climatologicos --start 1920-01-01 --end 2025-01-01 -o data
 
 .PHONY: api-specs
 api-specs:
