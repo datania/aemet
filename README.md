@@ -9,14 +9,13 @@ Para ejecutar el scripts en local, necesitas tener `uv` y la variable `AEMET_API
 
 ## 🚀 Uso
 
-Si quieres ejecutar el script, basta con hacer:
+La forma más fácil de lanzar los scripts es usando `uvx`.
 
 ```bash
-make estaciones
-make valores-climatologicos
+uvx "git+https://github.com/datania/aemet"
 ```
 
-También puede ejecutarlo directamente.
+Tienes acceso a los siguientes comandos:
 
 ```bash
 usage: aemet [-h] {estaciones,valores-climatologicos} ...
@@ -38,7 +37,14 @@ Examples:
   aemet valores-climatologicos --start 2025-01-01 --end 2025-01-31 -o data
 ```
 
-Checkea `data/raw` mientras que se ejecuta para ver los archivos descargados.
+Si quieres ejecutar el script y tienes el repositorio en local, basta con hacer:
+
+```bash
+make estaciones
+make valores-climatologicos
+```
+
+Checkea `data/raw` mientras que se ejecuta para ver los archivos descargados!
 
 ## 📄 Licencia
 
