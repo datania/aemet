@@ -1,0 +1,92 @@
+name: Export AEMET Data to HuggingFace
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'
+
+jobs:
+  export-data:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Calculate year range
+        id: year-range
+        run: |
+          # Configuration
+          DAYS_PER_RUN=4000  # About 11 years per run
+          START_DATE="1920-01-01"
+          TODAY=$(date +%Y-%m-%d)
+          
+          # Calculate which chunk based on run number
+          CHUNK_START_OFFSET=$(( ${{ github.run_number }} * DAYS_PER_RUN ))
+          
+          # Calculate start date by adding offset days to 1920-01-01
+          CHUNK_START_DATE=$(date -d "$START_DATE + $CHUNK_START_OFFSET days" +%Y-%m-%d 2>/dev/null || echo "9999-12-31")
+          
+          # If start date is beyond valid range, we're done processing all data
+          if [[ "$CHUNK_START_DATE" > "$TODAY" ]] || [[ "$CHUNK_START_DATE" == "9999-12-31" ]]; then
+            echo "All historical data has been processed (start date $CHUNK_START_DATE > today $TODAY)"
+            echo "start_date=$TODAY" >> $GITHUB_OUTPUT
+            echo "end_date=$TODAY" >> $GITHUB_OUTPUT
+            echo "skip_run=true" >> $GITHUB_OUTPUT
+          else
+            # Calculate end date (start + DAYS_PER_RUN)
+            CHUNK_END_DATE=$(date -d "$CHUNK_START_DATE + $DAYS_PER_RUN days" +%Y-%m-%d)
+            
+            # Cap end date at today
+            if [[ "$CHUNK_END_DATE" > "$TODAY" ]]; then
+              CHUNK_END_DATE=$TODAY
+            fi
+            
+            # Output results
+            echo "start_date=$CHUNK_START_DATE" >> $GITHUB_OUTPUT
+            echo "end_date=$CHUNK_END_DATE" >> $GITHUB_OUTPUT
+            echo "skip_run=false" >> $GITHUB_OUTPUT
+            
+            # Calculate days in this chunk for display
+            START_EPOCH=$(date -d "$CHUNK_START_DATE" +%s)
+            END_EPOCH=$(date -d "$CHUNK_END_DATE" +%s)
+            CHUNK_DAYS=$(( (END_EPOCH - START_EPOCH) / 86400 ))
+            
+            # Display information
+            echo "Configuration: DAYS_PER_RUN=$DAYS_PER_RUN"
+            echo "Run number: ${{ github.run_number }}"
+            echo "Processing period: $CHUNK_START_DATE to $CHUNK_END_DATE ($CHUNK_DAYS days)"
+          fi
+
+      - name: Display run information
+        if: steps.year-range.outputs.skip_run != 'true'
+        run: |
+          echo "Run number: ${{ github.run_number }}"
+          echo "Processing period: ${{ steps.year-range.outputs.start_date }} to ${{ steps.year-range.outputs.end_date }}"
+
+      - name: Fetch stations data
+        if: steps.year-range.outputs.skip_run != 'true'
+        env:
+          AEMET_API_TOKEN: ${{ secrets.AEMET_API_TOKEN }}
+        run: |
+          make estaciones
+
+      - name: Fetch climate values for year range
+        if: steps.year-range.outputs.skip_run != 'true'
+        env:
+          AEMET_API_TOKEN: ${{ secrets.AEMET_API_TOKEN }}
+        run: |
+          uv run aemet valores-climatologicos \
+            --start ${{ steps.year-range.outputs.start_date }} \
+            --end ${{ steps.year-range.outputs.end_date }} \
+            -o dataset
+
+      - name: Upload to HuggingFace
+        if: steps.year-range.outputs.skip_run != 'true'
+        env:
+          HUGGINGFACE_TOKEN: ${{ secrets.HUGGINGFACE_TOKEN }}
+        run: |
+          make upload
