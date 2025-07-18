@@ -1,6 +1,6 @@
 # Datos AEMET ⛅
 
-Datos de la API de AEMET, a un archivo de distancia. Este repositorio contiene scripts pare exportar datos de algunos de los endpoints disponibles en la [API de AEMET](https://opendata.aemet.es/dist/index.html).
+Datos de la API de AEMET, a un archivo de distancia. Este repositorio contiene scripts para exportar datos de algunos de los endpoints disponibles en la [API de AEMET](https://opendata.aemet.es/dist/index.html).
 
 
 ## 🛠️ Configuración
