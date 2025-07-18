@@ -28,35 +28,35 @@ def get_client():
     )
 
 
-def fetch_with_retry(client, url):
-    """Fetch URL with retry on rate limit."""
+def fetch_data(client, url):
+    """Fetch data from AEMET API with retry logic and two-step handling."""
     while True:
         try:
             response = client.get(url)
             response.raise_for_status()
-            return response
+            data = response.json()
+
+            # Handle AEMET's two-step response
+            if isinstance(data, dict) and "datos" in data:
+                data_response = client.get(data["datos"])
+                data_response.raise_for_status()
+                try:
+                    return data_response.json()
+                except UnicodeDecodeError:
+                    return json.loads(data_response.content.decode("latin-1"))
+
+            return data
+
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 429:
                 print("Rate limited, waiting 60 seconds...", file=sys.stderr)
                 time.sleep(60)
+            elif e.response.status_code == 500:
+                print(f"Server error 500 for URL: {e.request.url}", file=sys.stderr)
+                print("Waiting 60 seconds before retrying...", file=sys.stderr)
+                time.sleep(60)
             else:
                 raise
-
-
-def fetch_data(client, url):
-    """Execute AEMET's two-step API fetch."""
-    response = fetch_with_retry(client, url)
-    data = response.json()
-
-    # Handle two-step response
-    if isinstance(data, dict) and "datos" in data:
-        data_response = fetch_with_retry(client, data["datos"])
-        try:
-            return data_response.json()
-        except UnicodeDecodeError:
-            return json.loads(data_response.content.decode("latin-1"))
-
-    return data
 
 
 def get_day_file_path(output_dir, date):
@@ -70,52 +70,13 @@ def get_day_file_path(output_dir, date):
     )
 
 
-def get_date_range(start_str, end_str):
-    """Get start and end dates, using defaults if not provided."""
-    if start_str and end_str:
-        return (
-            datetime.strptime(start_str, "%Y-%m-%d"),
-            datetime.strptime(end_str, "%Y-%m-%d"),
-        )
-
-    end_date = datetime.now() - timedelta(days=1)
-    start_date = end_date - timedelta(days=30)
-    return start_date, end_date
-
-
-def has_missing_dates(output_dir, start_date, end_date):
-    """Check if any dates in range need fetching."""
-    current = start_date
-    while current <= end_date:
-        day_file = get_day_file_path(output_dir, current)
-        if not day_file.exists():
-            return True
-        current += timedelta(days=1)
-    return False
-
-
-def save_batch_data(output_dir, batch_data):
-    """Group and save batch data by date."""
-    records_by_date = defaultdict(list)
-    for record in batch_data:
-        if fecha := record.get("fecha"):
-            records_by_date[fecha].append(record)
-
-    for fecha, records in records_by_date.items():
-        date = datetime.strptime(fecha, "%Y-%m-%d")
-        day_file = get_day_file_path(output_dir, date)
-        save_json(day_file, records)
-
-
 def save_json(path, data):
     """Save data as JSON if file doesn't exist."""
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return True
-    return False
+    if path.exists():
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
 
 
 def fetch_stations(client, output_dir):
@@ -126,14 +87,15 @@ def fetch_stations(client, output_dir):
         return
 
     print("Fetching station information...", file=sys.stderr)
-    url = f"{BASE_URL}/valores/climatologicos/inventarioestaciones/todasestaciones"
-    stations = fetch_data(client, url)
+    stations = fetch_data(
+        client,
+        f"{BASE_URL}/valores/climatologicos/inventarioestaciones/todasestaciones",
+    )
 
-    saved = 0
-    for station in stations:
-        if save_json(stations_dir / f"{station['indicativo']}.json", station):
-            saved += 1
-
+    saved = sum(
+        save_json(stations_dir / f"{station['indicativo']}.json", station)
+        for station in stations
+    )
     print(f"Saved {saved} stations", file=sys.stderr)
 
 
@@ -144,22 +106,35 @@ def fetch_climate_data(client, output_dir, start_date, end_date):
     while current <= end_date:
         batch_end = min(current + timedelta(days=BATCH_SIZE_DAYS - 1), end_date)
 
-        # Check if any dates in this batch need fetching
-        if has_missing_dates(output_dir, current, batch_end):
+        # Check if any dates in batch need fetching
+        needs_fetch = any(
+            not get_day_file_path(output_dir, current + timedelta(days=i)).exists()
+            for i in range((batch_end - current).days + 1)
+        )
+
+        if needs_fetch:
             start_str = current.strftime("%Y-%m-%dT00:00:00UTC")
             end_str = batch_end.strftime("%Y-%m-%dT23:59:59UTC")
             url = f"{BASE_URL}/valores/climatologicos/diarios/datos/fechaini/{start_str}/fechafin/{end_str}/todasestaciones"
 
             print(f"Fetching {current.date()} to {batch_end.date()}", file=sys.stderr)
             batch_data = fetch_data(client, url)
-            save_batch_data(output_dir, batch_data)
+
+            # Group by date and save
+            records_by_date = defaultdict(list)
+            for record in batch_data:
+                if fecha := record.get("fecha"):
+                    records_by_date[fecha].append(record)
+
+            for fecha, records in records_by_date.items():
+                date = datetime.strptime(fecha, "%Y-%m-%d")
+                save_json(get_day_file_path(output_dir, date), records)
 
         current = batch_end + timedelta(days=1)
 
 
 def main():
     """AEMET climate data export tool."""
-
     parser = argparse.ArgumentParser(
         prog="aemet",
         description="Export AEMET climate data",
@@ -191,7 +166,14 @@ def main():
         if args.command == "estaciones":
             fetch_stations(client, output_dir)
         else:
-            start_date, end_date = get_date_range(args.start, args.end)
+            # Parse dates with defaults
+            if args.start and args.end:
+                start_date = datetime.strptime(args.start, "%Y-%m-%d")
+                end_date = datetime.strptime(args.end, "%Y-%m-%d")
+            else:
+                end_date = datetime.now() - timedelta(days=1)
+                start_date = end_date - timedelta(days=30)
+
             print(
                 f"Date range: {start_date.date()} to {end_date.date()}", file=sys.stderr
             )
