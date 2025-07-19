@@ -47,16 +47,20 @@ def fetch_data(client, url):
 
             return data
 
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
-                print("Rate limited, waiting 60 seconds...", file=sys.stderr)
-                time.sleep(60)
-            elif e.response.status_code == 500:
-                print(f"Server error 500 for URL: {e.request.url}", file=sys.stderr)
-                print("Waiting 60 seconds before retrying...", file=sys.stderr)
-                time.sleep(60)
+        except httpx.RequestError as e:
+            if isinstance(e, httpx.HTTPStatusError):
+                if e.response.status_code == 429:
+                    print("Rate limited, waiting 60 seconds...", file=sys.stderr)
+                else:
+                    print(
+                        f"HTTP {e.response.status_code} error: {e.request.url}",
+                        file=sys.stderr,
+                    )
+                    print("Waiting 60 seconds before retrying...", file=sys.stderr)
             else:
-                raise
+                print(f"Connection error: {type(e).__name__}", file=sys.stderr)
+                print("Waiting 60 seconds before retrying...", file=sys.stderr)
+            time.sleep(60)
 
 
 def get_day_file_path(output_dir, date):
