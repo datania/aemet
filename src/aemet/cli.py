@@ -33,13 +33,41 @@ def fetch_data(client, url):
     while True:
         try:
             response = client.get(url)
-            response.raise_for_status()
+
+            # Check for errors before processing
+            if response.status_code == 429:
+                print("Rate limited, waiting 60 seconds...", file=sys.stderr)
+                time.sleep(60)
+                continue
+            elif response.status_code >= 400:
+                print(
+                    f"HTTP {response.status_code} error: {response.url}",
+                    file=sys.stderr,
+                )
+                print("Waiting 60 seconds before retrying...", file=sys.stderr)
+                time.sleep(60)
+                continue
+
             data = response.json()
 
             # Handle AEMET's two-step response
             if isinstance(data, dict) and "datos" in data:
                 data_response = client.get(data["datos"])
-                data_response.raise_for_status()
+
+                # Check for errors in the second request
+                if data_response.status_code == 429:
+                    print("Rate limited, waiting 60 seconds...", file=sys.stderr)
+                    time.sleep(60)
+                    continue
+                elif data_response.status_code >= 400:
+                    print(
+                        f"HTTP {data_response.status_code} error: {data_response.url}",
+                        file=sys.stderr,
+                    )
+                    print("Waiting 60 seconds before retrying...", file=sys.stderr)
+                    time.sleep(60)
+                    continue
+
                 try:
                     return data_response.json()
                 except UnicodeDecodeError:
@@ -48,18 +76,8 @@ def fetch_data(client, url):
             return data
 
         except httpx.RequestError as e:
-            if isinstance(e, httpx.HTTPStatusError):
-                if e.response.status_code == 429:
-                    print("Rate limited, waiting 60 seconds...", file=sys.stderr)
-                else:
-                    print(
-                        f"HTTP {e.response.status_code} error: {e.request.url}",
-                        file=sys.stderr,
-                    )
-                    print("Waiting 60 seconds before retrying...", file=sys.stderr)
-            else:
-                print(f"Connection error: {type(e).__name__}", file=sys.stderr)
-                print("Waiting 60 seconds before retrying...", file=sys.stderr)
+            print(f"Connection error: {type(e).__name__}", file=sys.stderr)
+            print("Waiting 60 seconds before retrying...", file=sys.stderr)
             time.sleep(60)
 
 
