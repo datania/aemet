@@ -28,57 +28,57 @@ def get_client():
     )
 
 
-def fetch_data(client, url):
-    """Fetch data from AEMET API with retry logic and two-step handling."""
-    while True:
+def _make_request_with_retry(client, url):
+    """Make HTTP request with simple retry logic."""
+    for attempt in range(1, 6):
         try:
             response = client.get(url)
-
-            # Check for errors before processing
             if response.status_code == 429:
-                print("Rate limited, waiting 60 seconds...", file=sys.stderr)
-                time.sleep(60)
-                continue
+                print(
+                    f"Rate limited, waiting 60 seconds... (attempt {attempt}/5)",
+                    file=sys.stderr,
+                )
             elif response.status_code >= 400:
                 print(
                     f"HTTP {response.status_code} error: {response.url}",
                     file=sys.stderr,
                 )
-                print("Waiting 60 seconds before retrying...", file=sys.stderr)
+                print(
+                    f"Waiting 60 seconds before retrying... (attempt {attempt}/5)",
+                    file=sys.stderr,
+                )
+            else:
+                return response
+
+            if attempt < 5:
                 time.sleep(60)
-                continue
-
-            data = response.json()
-
-            # Handle AEMET's two-step response
-            if isinstance(data, dict) and "datos" in data:
-                data_response = client.get(data["datos"])
-
-                # Check for errors in the second request
-                if data_response.status_code == 429:
-                    print("Rate limited, waiting 60 seconds...", file=sys.stderr)
-                    time.sleep(60)
-                    continue
-                elif data_response.status_code >= 400:
-                    print(
-                        f"HTTP {data_response.status_code} error: {data_response.url}",
-                        file=sys.stderr,
-                    )
-                    print("Waiting 60 seconds before retrying...", file=sys.stderr)
-                    time.sleep(60)
-                    continue
-
-                try:
-                    return data_response.json()
-                except UnicodeDecodeError:
-                    return json.loads(data_response.content.decode("latin-1"))
-
-            return data
 
         except httpx.RequestError as e:
             print(f"Connection error: {type(e).__name__}", file=sys.stderr)
-            print("Waiting 60 seconds before retrying...", file=sys.stderr)
-            time.sleep(60)
+            print(
+                f"Waiting 60 seconds before retrying... (attempt {attempt}/5)",
+                file=sys.stderr,
+            )
+            if attempt < 5:
+                time.sleep(60)
+
+    raise Exception(f"Failed to fetch data after 5 attempts: {url}")
+
+
+def fetch_data(client, url):
+    """Fetch data from AEMET API with retry logic and two-step handling."""
+    response = _make_request_with_retry(client, url)
+    data = response.json()
+
+    # Handle AEMET's two-step response
+    if isinstance(data, dict) and "datos" in data:
+        data_response = _make_request_with_retry(client, data["datos"])
+        try:
+            return data_response.json()
+        except UnicodeDecodeError:
+            return json.loads(data_response.content.decode("latin-1"))
+
+    return data
 
 
 def get_day_file_path(output_dir, date):
@@ -140,17 +140,45 @@ def fetch_climate_data(client, output_dir, start_date, end_date):
             url = f"{BASE_URL}/valores/climatologicos/diarios/datos/fechaini/{start_str}/fechafin/{end_str}/todasestaciones"
 
             print(f"Fetching {current.date()} to {batch_end.date()}", file=sys.stderr)
-            batch_data = fetch_data(client, url)
 
-            # Group by date and save
-            records_by_date = defaultdict(list)
-            for record in batch_data:
-                if fecha := record.get("fecha"):
-                    records_by_date[fecha].append(record)
+            try:
+                batch_data = fetch_data(client, url)
 
-            for fecha, records in records_by_date.items():
-                date = datetime.strptime(fecha, "%Y-%m-%d")
-                save_json(get_day_file_path(output_dir, date), records)
+                # Validate that we got valid data
+                if not isinstance(batch_data, list):
+                    print(
+                        "Invalid data received (not a list), skipping batch",
+                        file=sys.stderr,
+                    )
+                    current = batch_end + timedelta(days=1)
+                    continue
+
+                if not batch_data:
+                    print("Empty data received, skipping batch", file=sys.stderr)
+                    current = batch_end + timedelta(days=1)
+                    continue
+
+                # Group by date and save
+                records_by_date = defaultdict(list)
+                for record in batch_data:
+                    if fecha := record.get("fecha"):
+                        records_by_date[fecha].append(record)
+
+                for fecha, records in records_by_date.items():
+                    date = datetime.strptime(fecha, "%Y-%m-%d")
+                    save_json(get_day_file_path(output_dir, date), records)
+
+                print(
+                    f"✓ Completed {current.date()} to {batch_end.date()}",
+                    file=sys.stderr,
+                )
+
+            except Exception as e:
+                print(
+                    f"Error fetching batch {current.date()} to {batch_end.date()}: {e}",
+                    file=sys.stderr,
+                )
+                print("Skipping this batch and continuing...", file=sys.stderr)
 
         current = batch_end + timedelta(days=1)
 
