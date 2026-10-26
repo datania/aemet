@@ -21,11 +21,10 @@ lint:
 
 .PHONY: upload
 upload:
-	uvx --from "huggingface_hub[hf_xet]" hf upload-large-folder \
+	uvx --from "huggingface_hub[hf_xet]" hf upload \
 		--token=${HUGGINGFACE_TOKEN} \
 		--repo-type dataset \
-		--num-workers 4 \
-		datania/aemet dataset/
+		datania/aemet dataset/ .
 
 .PHONY: clean
 clean:
